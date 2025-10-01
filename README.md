@@ -1,2 +1,2 @@
-# 93.maze
+# 94.maze
 maze
