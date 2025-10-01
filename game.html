@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Powered Maze Weaver - Day 94</title>
+    <style>
+        body { margin: 0; background: linear-gradient(to bottom, #1e3c72, #2a5298); font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; color: white; }
+        #gameContainer { text-align: center; display: flex; flex-direction: column; align-items: center; }
+        canvas { border: 2px solid #fff; background: #000; display: block; margin: 10px auto; }
+        #ui { margin: 10px; }
+        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; font-size: 16px; margin: 5px; }
+        button:hover { background: #45a049; }
+        #feedback { margin: 10px; }
+        input[type="number"] { width: 50px; margin: 0 5px; }
+        #controlsPanel { 
+            background: rgba(0,0,0,0.8); border: 1px solid #fff; padding: 15px; margin: 10px; border-radius: 8px; 
+            max-width: 300px; display: none; text-align: left; 
+        }
+        #controlsPanel ul { margin: 0; padding-left: 20px; }
+        #controlsPanel li { margin: 5px 0; }
+        #toggleControls { background: #2196F3; }
+        #toggleControls:hover { background: #1976D2; }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <h1>AI-Powered Maze Weaver</h1>
+        <canvas id="mazeCanvas" width="400" height="400"></canvas>
+        <div id="ui">
+            <p>Score: <span id="score">0</span> | Time: <span id="time">60</span>s | Runs: <span id="runs">0</span></p>
+            <button id="startBtn">Start/Next Level</button>
+            <button id="toggleControls">操作方法を表示</button>
+        </div>
+        <div id="controlsPanel">
+            <h3>操作方法</h3>
+            <ul>
+                <li><strong>移動</strong>: 矢印キー（↑↓←→）でプレイヤーを動かします。壁にぶつかると止まります。</li>
+                <li><strong>目標</strong>: 赤い出口に到達しつつ、金色のオーブを集めてスコアを稼ぎましょう。時間内にクリア！</li>
+                <li><strong>スタート</strong>: 「Start/Next Level」ボタンで新しいレベルを生成。AIがあなたのプレイを学習します。</li>
+                <li><strong>フィードバック</strong>: レベル終了後、1-5の評価でAIを適応させます。低評価なら迷路が優しく、高評価なら挑戦的に。</li>
+                <li><strong>ヒント</strong>: オーブのいるマスに踏み込むと自動収集。AIはあなたの「好み」を静かに覚えていきます。</li>
+            </ul>
+            <button id="closeControls">閉じる</button>
+        </div>
+        <div id="feedback" style="display: none;">
+            <p>Rate this level (1-5):</p>
+            <input type="number" id="rating" min="1" max="5" value="3">
+            <button id="submitFeedback">Adapt the AI</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mazeCanvas');
+        const ctx = canvas.getContext('2d');
+        const cellSize = 20;
+        const cols = canvas.width / cellSize;
+        const rows = canvas.height / cellSize;
+
+        let maze = [];
+        let player = { x: 1, y: 1, dx: 0, dy: 0 };
+        let orbs = [];
+        let score = 0;
+        let timeLeft = 60;
+        let gameRunning = false;
+        let animationId;
+        let runs = 0;
+        let particles = []; // For simple orb collection effect
+
+        // AI "Brain" - Persistent params
+        let aiBrain = JSON.parse(localStorage.getItem('aiBrain')) || { density: 0.5, orbBias: 0.3, learningRate: 0.1 };
+
+        // 操作方法パネルのトグル
+        document.getElementById('toggleControls').addEventListener('click', () => {
+            const panel = document.getElementById('controlsPanel');
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        });
+        document.getElementById('closeControls').addEventListener('click', () => {
+            document.getElementById('controlsPanel').style.display = 'none';
+        });
+
+        // BFS for reachability check
+        function isReachable(maze, startX, startY, goalX, goalY) {
+            const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+            const queue = [{ x: startX, y: startY }];
+            visited[startY][startX] = true;
+
+            while (queue.length > 0) {
+                const { x, y } = queue.shift();
+                if (x === goalX && y === goalY) return true;
+
+                const dirs = [{ dx: 0, dy: 1 }, { dx: 1, dy: 0 }, { dx: 0, dy: -1 }, { dx: -1, dy: 0 }];
+                for (const { dx, dy } of dirs) {
+                    const nx = x + dx;
+                    const ny = y + dy;
+                    if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && maze[ny][nx] === 0 && !visited[ny][nx]) {
+                        visited[ny][nx] = true;
+                        queue.push({ x: nx, y: ny });
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Generate maze with guarantee
+        function generateMaze() {
+            let attempts = 0;
+            let goalX = cols - 2;
+            let goalY = rows - 2;
+            let startX = 1;
+            let startY = 1;
+
+            while (attempts < 10) {
+                maze = Array.from({ length: rows }, () => Array(cols).fill(1)); // 1 = wall
+                const stack = [{ x: startX, y: startY }];
+                maze[startY][startX] = 0; // Start as path
+
+                while (stack.length) {
+                    const { x, y } = stack[stack.length - 1];
+                    const neighbors = shuffle(getUnvisitedNeighbors(x, y));
+                    if (neighbors.length) {
+                        const { nx, ny, dir } = neighbors[0];
+                        maze[ny][nx] = 0;
+                        removeWall(x, y, dir);
+                        stack.push({ x: nx, y: ny });
+                    } else {
+                        stack.pop();
+                    }
+                }
+
+                // Ensure goal is path
+                maze[goalY][goalX] = 0;
+
+                // Adjust density based on AI (simplified, post-adjust if needed)
+                const wallCount = maze.flat().filter(cell => cell === 1).length;
+                const targetWalls = Math.floor((rows * cols) * aiBrain.density);
+                if (wallCount > targetWalls * 1.2) {
+                    for (let i = 0; i < wallCount - targetWalls; i++) {
+                        const rx = Math.floor(Math.random() * cols);
+                        const ry = Math.floor(Math.random() * rows);
+                        if (maze[ry][rx] === 1 && !isIsolated(ry, rx)) maze[ry][rx] = 0;
+                    }
+                }
+
+                // Check reachability
+                if (isReachable(maze, startX, startY, goalX, goalY)) {
+                    console.log(`Maze generated successfully on attempt ${attempts + 1}`);
+                    break;
+                }
+                attempts++;
+            }
+
+            if (attempts >= 10) {
+                console.warn('Max attempts reached; maze may not be fully connected.');
+            }
+
+            // Place orbs with bias toward paths
+            orbs = [];
+            for (let i = 0; i < 5; i++) {
+                let ox, oy;
+                do {
+                    ox = Math.floor(Math.random() * (cols - 2)) + 1;
+                    oy = Math.floor(Math.random() * (rows - 2)) + 1;
+                } while (maze[oy][ox] !== 0);
+                orbs.push({ ox: ox, oy: oy, x: ox * cellSize + cellSize / 2, y: oy * cellSize + cellSize / 2 });
+            }
+        }
+
+        function getUnvisitedNeighbors(x, y) {
+            const dirs = [
+                { nx: x + 2, ny: y, dir: 'right' },
+                { nx: x - 2, ny: y, dir: 'left' },
+                { nx: x, ny: y + 2, dir: 'down' },
+                { nx: x, ny: y - 2, dir: 'up' }
+            ];
+            return dirs.filter(d => d.nx > 0 && d.nx < cols && d.ny > 0 && d.ny < rows && maze[d.ny][d.nx] === 1);
+        }
+
+        function removeWall(x, y, dir) {
+            if (dir === 'right') maze[y][x + 1] = 0;
+            if (dir === 'left') maze[y][x - 1] = 0;
+            if (dir === 'down') maze[y + 1][x] = 0;
+            if (dir === 'up') maze[y - 1][x] = 0;
+        }
+
+        function isIsolated(y, x) { /* Simple check to avoid floating walls */ return false; } // Placeholder for brevity
+
+        function shuffle(array) { 
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array; 
+        }
+
+        // Simple particle effect for orb collection
+        function createParticles(px, py) {
+            for (let i = 0; i < 5; i++) {
+                particles.push({
+                    x: px,
+                    y: py,
+                    vx: (Math.random() - 0.5) * 4,
+                    vy: (Math.random() - 0.5) * 4,
+                    life: 20
+                });
+            }
+        }
+
+        function updateParticles() {
+            particles = particles.filter(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life--;
+                return p.life > 0;
+            });
+        }
+
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 215, 0, ${p.life / 20})`;
+                ctx.fill();
+            });
+        }
+
+        function drawMaze() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    ctx.fillStyle = maze[y][x] ? '#333' : '#111';
+                    ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+                }
+            }
+            orbs.forEach(orb => {
+                ctx.beginPath();
+                ctx.arc(orb.x, orb.y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#FFD700';
+                ctx.fill();
+            });
+            // Draw player
+            ctx.fillStyle = '#00FF00';
+            ctx.fillRect(player.x * cellSize + 2, player.y * cellSize + 2, cellSize - 4, cellSize - 4);
+            // End goal
+            ctx.fillStyle = '#FF0000';
+            ctx.fillRect((cols - 2) * cellSize, (rows - 2) * cellSize, cellSize, cellSize);
+            // Draw particles
+            drawParticles();
+        }
+
+        function updatePlayer() {
+            const newX = player.x + player.dx;
+            const newY = player.y + player.dy;
+            if (newX >= 0 && newX < cols && newY >= 0 && newY < rows && !maze[newY][newX]) {
+                player.x = newX;
+                player.y = newY;
+            }
+            player.dx = player.dy = 0;
+
+            // Collect orbs on cell entry
+            orbs = orbs.filter(orb => {
+                if (player.x === orb.ox && player.y === orb.oy) {
+                    score += 10;
+                    document.getElementById('score').textContent = score;
+                    createParticles(orb.x, orb.y);
+                    return false;
+                }
+                return true;
+            });
+
+            // Check win
+            if (player.x === cols - 2 && player.y === rows - 2) {
+                endGame(true);
+            }
+        }
+
+        function gameLoop() {
+            if (!gameRunning) return;
+            updatePlayer();
+            updateParticles();
+            drawMaze();
+            timeLeft -= 1/60;
+            document.getElementById('time').textContent = Math.ceil(timeLeft);
+            if (timeLeft <= 0) endGame(false);
+            animationId = requestAnimationFrame(gameLoop);
+        }
+
+        function endGame(won) {
+            gameRunning = false;
+            cancelAnimationFrame(animationId);
+            runs++;
+            document.getElementById('runs').textContent = runs;
+            const performance = (score / 50 + (won ? 1 : 0)) / 2; // Normalized 0-1
+            document.getElementById('feedback').style.display = 'block';
+            document.getElementById('rating').value = Math.max(1, Math.min(5, Math.round(performance * 5)));
+        }
+
+        function adaptAI(rating) {
+            const normalizedRating = (rating - 3) / 2; // -1 to 1
+            aiBrain.density += normalizedRating * aiBrain.learningRate * 0.1;
+            aiBrain.orbBias += normalizedRating * aiBrain.learningRate * 0.05;
+            aiBrain.density = Math.max(0.3, Math.min(0.8, aiBrain.density));
+            aiBrain.orbBias = Math.max(0.1, Math.min(0.5, aiBrain.orbBias));
+            localStorage.setItem('aiBrain', JSON.stringify(aiBrain));
+            console.log('AI Adapted:', aiBrain);
+            document.getElementById('feedback').style.display = 'none';
+            startGame();
+        }
+
+        function startGame() {
+            generateMaze();
+            player = { x: 1, y: 1, dx: 0, dy: 0 };
+            score = 0;
+            timeLeft = 60;
+            particles = [];
+            gameRunning = true;
+            document.getElementById('score').textContent = score;
+            document.getElementById('time').textContent = timeLeft;
+            gameLoop();
+        }
+
+        // Controls
+        document.addEventListener('keydown', e => {
+            if (!gameRunning) return;
+            if (e.key === 'ArrowUp') player.dy = -1;
+            if (e.key === 'ArrowDown') player.dy = 1;
+            if (e.key === 'ArrowLeft') player.dx = -1;
+            if (e.key === 'ArrowRight') player.dx = 1;
+        });
+
+        // UI Events
+        document.getElementById('startBtn').addEventListener('click', startGame);
+        document.getElementById('submitFeedback').addEventListener('click', () => {
+            const rating = parseInt(document.getElementById('rating').value);
+            if (rating >= 1 && rating <= 5) adaptAI(rating);
+        });
+
+        // Initial draw
+        generateMaze();
+        drawMaze();
+    </script>
+</body>
+</html>
